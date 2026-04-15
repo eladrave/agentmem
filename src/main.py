@@ -192,7 +192,7 @@ async def admin_dream_all(background_tasks: BackgroundTasks, admin=Depends(verif
 
 # --- MCP INTEGRATION ---
 
-sse_transport = SseServerTransport("/mcp/messages")
+sse_transport = SseServerTransport("/mcp/messages/")
 
 # We mount the endpoints using Starlette's Mount/Route to avoid FastAPI intercepting the response lifecycle 
 # exactly the way FastMCP does.
@@ -270,5 +270,5 @@ async def handle_sse(request: Request) -> Response:
     return Response()
 
 app.routes.append(Route("/mcp/sse", endpoint=handle_sse, methods=["GET"]))
-app.routes.append(Mount("/mcp/messages", app=sse_transport.handle_post_message))
+app.routes.append(Mount("/mcp/messages/", app=sse_transport.handle_post_message))
 
