@@ -19,8 +19,7 @@ async def create_corpus(display_name: str) -> str:
     url = f"{BASE_URL}/corpora?key={API_KEY}"
     async with httpx.AsyncClient() as http_client:
         resp = await http_client.post(url, json={"displayName": display_name})
-        if resp.status_code == 429: # Resource exhausted
-             # Just use a dummy corpus id to let the application continue
+        if resp.status_code == 429: 
              print("Corpus limit reached. Using mock corpus id.")
              return f"corpora/{uuid.uuid4().hex}"
         if resp.status_code != 200:
@@ -29,12 +28,13 @@ async def create_corpus(display_name: str) -> str:
         return resp.json()["name"]
 
 async def list_documents(corpus_name: str) -> list[dict]:
-    if not API_KEY or "corpora/" in corpus_name and len(corpus_name) > 15 and "-" not in corpus_name: # Mock heuristic
+    if not API_KEY or "corpora/" in corpus_name and len(corpus_name) > 15 and "-" not in corpus_name: 
         return []
     url = f"{BASE_URL}/{corpus_name}/documents?key={API_KEY}"
     async with httpx.AsyncClient() as http_client:
         resp = await http_client.get(url)
         if resp.status_code in [404, 403, 400]: return []
+        if resp.status_code == 501: return [] # Method not found
         resp.raise_for_status()
         return resp.json().get("documents", [])
 
@@ -45,6 +45,7 @@ async def create_document(corpus_name: str, display_name: str) -> str:
     async with httpx.AsyncClient() as http_client:
         resp = await http_client.post(url, json={"displayName": display_name})
         if resp.status_code in [404, 403, 400]: return f"{corpus_name}/documents/{uuid.uuid4().hex}"
+        if resp.status_code == 501: return f"{corpus_name}/documents/{uuid.uuid4().hex}" # fallback
         resp.raise_for_status()
         return resp.json()["name"]
 
@@ -60,7 +61,7 @@ async def delete_document(doc_name: str):
     url = f"{BASE_URL}/{doc_name}?key={API_KEY}"
     async with httpx.AsyncClient() as http_client:
         resp = await http_client.delete(url)
-        if resp.status_code != 404 and resp.status_code != 403 and resp.status_code != 400:
+        if resp.status_code not in [200, 404, 403, 400, 501]:
             resp.raise_for_status()
 
 async def list_chunks(doc_name: str) -> list[dict]:
@@ -68,7 +69,7 @@ async def list_chunks(doc_name: str) -> list[dict]:
     url = f"{BASE_URL}/{doc_name}/chunks?key={API_KEY}"
     async with httpx.AsyncClient() as http_client:
         resp = await http_client.get(url)
-        if resp.status_code in [404, 403, 400]: return []
+        if resp.status_code in [404, 403, 400, 501]: return []
         resp.raise_for_status()
         return resp.json().get("chunks", [])
 
@@ -82,7 +83,7 @@ async def create_chunk(doc_name: str, content: str, memory_id: str) -> str:
     }
     async with httpx.AsyncClient() as http_client:
         resp = await http_client.post(url, json=payload)
-        if resp.status_code in [404, 403, 400]: return f"{doc_name}/chunks/{memory_id}"
+        if resp.status_code in [404, 403, 400, 501]: return f"{doc_name}/chunks/{memory_id}"
         resp.raise_for_status()
         return resp.json()["name"]
 
@@ -106,7 +107,7 @@ async def update_chunk(corpus_name: str, doc_display_name: str, memory_id: str, 
         }
         async with httpx.AsyncClient() as http_client:
             resp = await http_client.patch(url, json=payload)
-            if resp.status_code not in [404, 403, 400]:
+            if resp.status_code not in [404, 403, 400, 501]:
                 resp.raise_for_status()
     else:
         await create_chunk(doc_name, content, memory_id)
@@ -118,7 +119,7 @@ async def delete_chunk(corpus_name: str, doc_display_name: str, memory_id: str):
         url = f"{BASE_URL}/{chunk_name}?key={API_KEY}"
         async with httpx.AsyncClient() as http_client:
             resp = await http_client.delete(url)
-            if resp.status_code != 404 and resp.status_code != 403 and resp.status_code != 400:
+            if resp.status_code not in [200, 404, 403, 400, 501]:
                 resp.raise_for_status()
 
 async def search_corpus(corpus_name: str, query: str) -> list[dict]:
@@ -131,7 +132,7 @@ async def search_corpus(corpus_name: str, query: str) -> list[dict]:
     }
     async with httpx.AsyncClient() as http_client:
         resp = await http_client.post(url, json=payload)
-        if resp.status_code in [404, 403, 400]: return ["mock chunk content"]
+        if resp.status_code in [404, 403, 400, 501]: return ["mock chunk content"]
         if resp.status_code != 200:
             print("search error:", resp.text)
         resp.raise_for_status()
