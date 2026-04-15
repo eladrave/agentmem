@@ -8,6 +8,7 @@ from src import storage, gemini_service
 import os
 import aiofiles
 from datetime import datetime, timedelta
+import re
 
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
@@ -40,7 +41,7 @@ async def verify_user(authorization: str = Header(None), x_gemini_api_key: str =
                 return {
                     "user_id": uid, 
                     "corpus_id": udata["gemini_corpus_id"],
-                    "api_key": x_gemini_api_key # Pass the user's specific key if provided
+                    "api_key": x_gemini_api_key
                 }
     raise HTTPException(status_code=401, detail="Invalid or revoked token")
 
@@ -53,7 +54,7 @@ async def create_user(admin=Depends(verify_admin), x_gemini_api_key: str = Heade
     user_id = str(uuid.uuid4())
     raw_token = "mem_" + str(uuid.uuid4()).replace("-", "")
     hashed = storage.hash_token(raw_token)
-    corpus_id = await gemini_service.create_corpus(f"Memory Corpus for {user_id}", api_key=x_gemini_api_key)
+    corpus_id = await gemini_service.create_file_search_store(f"Memory Store for {user_id}", api_key=x_gemini_api_key)
     users_data = await storage.load_users()
     users_data["users"][user_id] = {
         "gemini_corpus_id": corpus_id,
@@ -93,48 +94,52 @@ async def rebuild_corpus(req: RebuildCorpusRequest, user_info=Depends(verify_use
     user_id = user_info["user_id"]
     new_api_key = req.new_api_key
     
-    # 1. Create a new corpus on the new key
-    new_corpus_id = await gemini_service.create_corpus(f"Memory Corpus for {user_id}", api_key=new_api_key)
+    new_corpus_id = await gemini_service.create_file_search_store(f"Memory Store for {user_id}", api_key=new_api_key)
     
-    # 2. Update users.json
     users_data = await storage.load_users()
     users_data["users"][user_id]["gemini_corpus_id"] = new_corpus_id
     await storage.save_users(users_data)
     
-    # 3. Force sync all memories to the new corpus
     await sync_user_memories(user_id, new_corpus_id, force=True, api_key=new_api_key)
-    
     return {"status": "success", "new_corpus_id": new_corpus_id}
 
 async def sync_user_memories(user_id: str, corpus_id: str, force: bool, api_key: str = None):
     user_dir = os.path.join(storage.DATA_DIR, user_id)
     if not os.path.exists(user_dir): return
-    local_files = [f for f in os.listdir(user_dir) if f.startswith("memory.") and f.endswith(".md")]
-    if force:
-        docs = await gemini_service.list_documents(corpus_id, api_key=api_key)
-        for doc in docs:
-            await gemini_service.delete_document(doc["name"], api_key=api_key)
-    for fname in local_files:
-        file_path = os.path.join(user_dir, fname)
-        blocks = await storage.parse_memory_file(file_path)
-        doc_name = await gemini_service.get_or_create_document(corpus_id, fname, api_key=api_key)
-        remote_chunks = await gemini_service.list_chunks(doc_name, api_key=api_key)
-        remote_map = {}
-        for rc in remote_chunks:
-            mid = None
-            if rc.get("customMetadata"):
-                for m in rc["customMetadata"]:
-                    if m.get("key") == "memory_id": mid = m.get("stringValue")
-            if mid: remote_map[mid] = rc
-        local_map = {b['id']: b for b in blocks}
-        for mid, b in local_map.items():
-            if mid not in remote_map:
-                await gemini_service.create_chunk(doc_name, b['content'], mid, api_key=api_key)
-        for mid, rc in remote_map.items():
-            if mid not in local_map:
-                await gemini_service.delete_chunk(corpus_id, fname, mid, api_key=api_key)
+    
+    # Process local active files based on time-window
+    current_prefix = storage.get_current_block_prefix()
+    
+    async with storage.get_user_lock(user_id):
+        for fname in os.listdir(user_dir):
+            if fname.endswith(".active.md"):
+                # If force=True, or if the file is from an older time window
+                prefix = fname.replace("memory.", "").replace(".active.md", "")
+                if force or prefix != current_prefix:
+                    new_fname = fname.replace(".active.md", ".ingested.md")
+                    os.rename(os.path.join(user_dir, fname), os.path.join(user_dir, new_fname))
 
-import re
+    # Get local files that belong in Gemini (ingested or postdream)
+    local_files = [f for f in os.listdir(user_dir) if f.endswith(".ingested.md") or f.endswith(".postdream.md")]
+    
+    if force:
+        docs = await gemini_service.list_files_in_store(corpus_id, api_key=api_key)
+        for doc in docs:
+            await gemini_service.delete_file_from_store(doc.name, api_key=api_key)
+            
+    # Sync loop
+    remote_docs = await gemini_service.list_files_in_store(corpus_id, api_key=api_key)
+    remote_map = {d.display_name: d for d in remote_docs}
+    
+    for fname in local_files:
+        if fname not in remote_map:
+            file_path = os.path.join(user_dir, fname)
+            await gemini_service.upload_and_attach_file(file_path, fname, corpus_id, api_key=api_key)
+            
+    # Delete orphans
+    for r_name, d in remote_map.items():
+        if r_name not in local_files:
+            await gemini_service.delete_file_from_store(d.name, api_key=api_key)
 
 async def process_dream_output(user_id: str, corpus_id: str, target_date: str, raw_output: str, api_key: str = None):
     user_dir = os.path.join(storage.DATA_DIR, user_id)
@@ -156,28 +161,22 @@ async def process_dream_output(user_id: str, corpus_id: str, target_date: str, r
     async with storage.get_user_lock(user_id):
         await storage.write_memory_file(post_file, blocks)
         
-    docs = await gemini_service.list_documents(corpus_id, api_key=api_key)
-    for doc in docs:
-        dname = doc.get("displayName", "")
-        if dname == f"memory.{target_date}.md" or dname == f"memory.{target_date}.postdream.md":
-            await gemini_service.delete_document(doc["name"], api_key=api_key)
-            
-    doc_name = await gemini_service.get_or_create_document(corpus_id, f"memory.{target_date}.postdream.md", api_key=api_key)
-    for b in blocks:
-        await gemini_service.create_chunk(doc_name, b['content'], b['id'], api_key=api_key)
+    await sync_user_memories(user_id, corpus_id, force=False, api_key=api_key)
 
 async def run_dream_for_user(user_id: str, corpus_id: str, target_date: str, api_key: str = None):
     user_dir = os.path.join(storage.DATA_DIR, user_id)
-    md_file = os.path.join(user_dir, f"memory.{target_date}.md")
-    post_file = os.path.join(user_dir, f"memory.{target_date}.postdream.md")
     
     combined_text = ""
-    if os.path.exists(md_file):
-        async with aiofiles.open(md_file, 'r') as f:
-            combined_text += await f.read() + "\n"
-    if os.path.exists(post_file):
-        async with aiofiles.open(post_file, 'r') as f:
-            combined_text += await f.read() + "\n"
+    # Collect all ingested/active files for the target date
+    files_to_delete = []
+    
+    if os.path.exists(user_dir):
+        for fname in os.listdir(user_dir):
+            if target_date in fname and fname.endswith(".md"):
+                file_path = os.path.join(user_dir, fname)
+                async with aiofiles.open(file_path, 'r') as f:
+                    combined_text += await f.read() + "\n"
+                files_to_delete.append(file_path)
             
     if not combined_text.strip(): return
         
@@ -186,8 +185,10 @@ async def run_dream_for_user(user_id: str, corpus_id: str, target_date: str, api
         
     new_content = await gemini_service.generate_dream(prompt, combined_text, api_key=api_key)
     
-    if os.path.exists(md_file):
-        os.remove(md_file)
+    # Delete the old files locally
+    for f in files_to_delete:
+        if os.path.exists(f):
+            os.remove(f)
         
     await process_dream_output(user_id, corpus_id, target_date, new_content, api_key=api_key)
 
@@ -209,7 +210,7 @@ async def admin_dream_all(background_tasks: BackgroundTasks, admin=Depends(verif
             corpus_id = udata.get("gemini_corpus_id")
             if corpus_id:
                 try:
-                    await run_dream_for_user(uid, corpus_id, target_date) # Defaults to server API key if none provided
+                    await run_dream_for_user(uid, corpus_id, target_date)
                 except Exception as e:
                     print(f"Dream failed for {uid}: {e}")
     background_tasks.add_task(run_all)
@@ -221,7 +222,6 @@ sse_transport = SseServerTransport("/mcp/messages/")
 
 from starlette.routing import Route, Mount
 from starlette.middleware import Middleware
-from starlette.responses import Response
 
 async def handle_sse(request: Request) -> Response:
     auth_header = request.headers.get("authorization")
@@ -268,24 +268,37 @@ async def handle_sse(request: Request) -> Response:
         
         try:
             if name == "add_memory":
-                memory_id, _, date_str = await storage.append_memory(user_id, arguments["content"])
-                await gemini_service.update_chunk(corpus_id, f"memory.{date_str}.md", memory_id, arguments["content"], api_key=api_key)
+                # Only touches active files. Doesn't trigger gemini uploads immediately.
+                memory_id, _, file_name = await storage.append_memory(user_id, arguments["content"])
+                # We implicitly trigger sync_user_memories which checks time-windows
+                await sync_user_memories(user_id, corpus_id, force=False, api_key=api_key)
                 return [TextContent(type="text", text=f"Added memory {memory_id}")]
+                
             elif name == "search_memories":
-                results = await gemini_service.search_corpus(corpus_id, arguments["query"], api_key=api_key)
-                return [TextContent(type="text", text="Search Results:\n" + "\n".join(results))]
+                # Ensure ingested files are up to date via checking time windows
+                await sync_user_memories(user_id, corpus_id, force=False, api_key=api_key)
+                active_context = await storage.get_active_context(user_id)
+                results = await gemini_service.search_memory_files(arguments["query"], corpus_id, active_context, api_key=api_key)
+                return [TextContent(type="text", text=f"Search Results:\n\n{results}")]
+                
             elif name == "update_memory":
-                success = await storage.update_memory(user_id, arguments["memory_id"], arguments["new_content"])
+                success, fname = await storage.update_memory(user_id, arguments["memory_id"], arguments["new_content"])
                 if success:
-                    await sync_user_memories(user_id, corpus_id, force=False, api_key=api_key)
+                    # If it was an ingested/postdream file, it needs to be synced
+                    if not fname.endswith(".active.md"):
+                        # Force sync the remote side to catch the modified file
+                        await sync_user_memories(user_id, corpus_id, force=True, api_key=api_key)
                     return [TextContent(type="text", text=f"Updated memory {arguments['memory_id']}")]
                 return [TextContent(type="text", text=f"Memory {arguments['memory_id']} not found")]
+                
             elif name == "delete_memory":
-                success = await storage.delete_memory(user_id, arguments["memory_id"])
+                success, fname = await storage.delete_memory(user_id, arguments["memory_id"])
                 if success:
-                    await sync_user_memories(user_id, corpus_id, force=False, api_key=api_key)
+                    if not fname.endswith(".active.md"):
+                        await sync_user_memories(user_id, corpus_id, force=True, api_key=api_key)
                     return [TextContent(type="text", text=f"Deleted memory {arguments['memory_id']}")]
                 return [TextContent(type="text", text=f"Memory {arguments['memory_id']} not found")]
+                
             elif name == "sync_memories":
                 await sync_user_memories(user_id, corpus_id, force=arguments.get("force_sync", False), api_key=api_key)
                 return [TextContent(type="text", text="Sync completed")]
