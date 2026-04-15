@@ -94,3 +94,41 @@ curl -X POST http://localhost:8080/admin/users/<YOUR_USER_ID>/rotate \
      -H "X-Admin-Password: your_secure_password"
 ```
 This sets the old token's status to `revoked` and returns a fresh `mem_...` token for immediate use.
+
+## MCP Client Configuration
+
+Once you have provisioned a user and received a `token`, you can configure your MCP client to connect to the server.
+
+### Standard Configuration Example
+
+Here is an example configuration for connecting an MCP Client via Server-Sent Events (SSE):
+
+```json
+{
+  "mcpServers": {
+    "agentic_memory": {
+      "command": "curl",
+      "args": [],
+      "transport": {
+        "type": "sse",
+        "url": "https://<YOUR_CLOUD_RUN_URL>/mcp/sse",
+        "headers": {
+          "Authorization": "Bearer <YOUR_MEM_TOKEN>"
+        }
+      }
+    }
+  }
+}
+```
+
+*Note: Depending on your specific MCP Client (e.g., Claude Desktop, Cursor, or a custom implementation), the exact JSON structure for configuring an SSE transport might vary slightly. Ensure you specify the transport type as `sse`, provide the full URL to the `/mcp/sse` endpoint, and include the `Authorization` header with your Bearer token.*
+
+### Available Tools
+
+Once connected, your AI agent will have access to the following tools:
+
+1.  **`add_memory(content: str)`**: Appends a new memory block to today's active file and syncs it to Gemini.
+2.  **`search_memories(query: str)`**: Semantically searches all stored memories using the Gemini Retriever API.
+3.  **`update_memory(memory_id: str, new_content: str)`**: Replaces the content of a specific memory block both locally and in Gemini.
+4.  **`delete_memory(memory_id: str)`**: Removes a specific memory block locally and from Gemini.
+5.  **`sync_memories(force_sync: bool)`**: Forces a synchronization between the local file system (Source of Truth) and the Gemini Corpus.
