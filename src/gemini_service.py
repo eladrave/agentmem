@@ -9,9 +9,12 @@ DREAM_MODEL = os.environ.get("GEMINI_DREAM_MODEL", "gemini-2.5-pro")
 SEARCH_MODEL = os.environ.get("GEMINI_MODEL_NAME", "gemini-2.5-flash")
 
 def get_client(api_key: str = None) -> genai.Client | None:
-    key = api_key if api_key else SERVER_API_KEY
-    if not key: return None
-    return genai.Client(api_key=key)
+    # If the user explicitly passed "None" or "", we fall back to SERVER_API_KEY
+    key = api_key if api_key and api_key.strip() else SERVER_API_KEY
+    if not key or not key.strip(): 
+        print("CRITICAL: No API Key found in either explicit argument or SERVER_API_KEY")
+        return None
+    return genai.Client(api_key=key.strip())
 
 async def create_file_search_store(display_name: str, api_key: str = None) -> str:
     client = get_client(api_key)
