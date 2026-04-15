@@ -84,3 +84,13 @@ The script will:
 2. Create a GCS Bucket for permanent state.
 3. Deploy the container to Cloud Run with GCS FUSE mounted at `/data`.
 4. Output your `ADMIN_PASSWORD` securely.
+
+### Rotating a User Token
+
+If you ever need to invalidate a user's current token and generate a new one, use the rotate endpoint:
+
+```bash
+curl -X POST http://localhost:8080/admin/users/<YOUR_USER_ID>/rotate \
+     -H "X-Admin-Password: your_secure_password"
+```
+This sets the old token's status to `revoked` and returns a fresh `mem_...` token for immediate use.
