@@ -79,8 +79,9 @@ gcloud run deploy agentmem-mcp \
   --allow-unauthenticated \
   --execution-environment gen2 \
   --add-volume name=gcs-data,type=cloud-storage,bucket=${BUCKET_NAME} \
-  --add-volume-mount name=gcs-data,mount-path=/data \
-  --set-env-vars="GEMINI_API_KEY=${GEMINI_API_KEY},ADMIN_PASSWORD=${ADMIN_PASSWORD}"
+  --add-volume-mount volume=gcs-data,mount-path=/data \
+  --set-env-vars="GEMINI_API_KEY=${GEMINI_API_KEY},ADMIN_PASSWORD=${ADMIN_PASSWORD}" \
+  --quiet
 
 SERVICE_URL=$(gcloud run services describe agentmem-mcp --region="${REGION}" --format="value(status.url)")
 
