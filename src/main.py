@@ -86,6 +86,23 @@ async def rotate_user(user_id: str, admin=Depends(verify_admin)):
     await storage.save_users(users_data)
     return UserResponse(user_id=user_id, token=raw_token)
 
+@app.get("/admin/dream_prompt")
+async def get_dream_prompt(admin=Depends(verify_admin)):
+    if os.path.exists(storage.DREAM_PROMPT_FILE):
+        async with aiofiles.open(storage.DREAM_PROMPT_FILE, 'r') as f:
+            prompt = await f.read()
+            return {"prompt": prompt}
+    return {"prompt": ""}
+
+class PromptUpdate(BaseModel):
+    prompt: str
+
+@app.post("/admin/dream_prompt")
+async def set_dream_prompt(req: PromptUpdate, admin=Depends(verify_admin)):
+    async with aiofiles.open(storage.DREAM_PROMPT_FILE, 'w') as f:
+        await f.write(req.prompt)
+    return {"status": "success"}
+
 class RebuildCorpusRequest(BaseModel):
     new_api_key: str
 
@@ -107,19 +124,16 @@ async def sync_user_memories(user_id: str, corpus_id: str, force: bool, api_key:
     user_dir = os.path.join(storage.DATA_DIR, user_id)
     if not os.path.exists(user_dir): return
     
-    # Process local active files based on time-window
     current_prefix = storage.get_current_block_prefix()
     
     async with storage.get_user_lock(user_id):
         for fname in os.listdir(user_dir):
             if fname.endswith(".active.md"):
-                # If force=True, or if the file is from an older time window
                 prefix = fname.replace("memory.", "").replace(".active.md", "")
                 if force or prefix != current_prefix:
                     new_fname = fname.replace(".active.md", ".ingested.md")
                     os.rename(os.path.join(user_dir, fname), os.path.join(user_dir, new_fname))
 
-    # Get local files that belong in Gemini (ingested or postdream)
     local_files = [f for f in os.listdir(user_dir) if f.endswith(".ingested.md") or f.endswith(".postdream.md")]
     
     if force:
@@ -127,7 +141,6 @@ async def sync_user_memories(user_id: str, corpus_id: str, force: bool, api_key:
         for doc in docs:
             await gemini_service.delete_file_from_store(doc.name, api_key=api_key)
             
-    # Sync loop
     remote_docs = await gemini_service.list_files_in_store(corpus_id, api_key=api_key)
     remote_map = {d.display_name: d for d in remote_docs}
     
@@ -136,7 +149,6 @@ async def sync_user_memories(user_id: str, corpus_id: str, force: bool, api_key:
             file_path = os.path.join(user_dir, fname)
             await gemini_service.upload_and_attach_file(file_path, fname, corpus_id, api_key=api_key)
             
-    # Delete orphans
     for r_name, d in remote_map.items():
         if r_name not in local_files:
             await gemini_service.delete_file_from_store(d.name, api_key=api_key)
@@ -167,7 +179,6 @@ async def run_dream_for_user(user_id: str, corpus_id: str, target_date: str, api
     user_dir = os.path.join(storage.DATA_DIR, user_id)
     
     combined_text = ""
-    # Collect all ingested/active files for the target date
     files_to_delete = []
     
     if os.path.exists(user_dir):
@@ -185,7 +196,6 @@ async def run_dream_for_user(user_id: str, corpus_id: str, target_date: str, api
         
     new_content = await gemini_service.generate_dream(prompt, combined_text, api_key=api_key)
     
-    # Delete the old files locally
     for f in files_to_delete:
         if os.path.exists(f):
             os.remove(f)
@@ -268,14 +278,11 @@ async def handle_sse(request: Request) -> Response:
         
         try:
             if name == "add_memory":
-                # Only touches active files. Doesn't trigger gemini uploads immediately.
                 memory_id, _, file_name = await storage.append_memory(user_id, arguments["content"])
-                # We implicitly trigger sync_user_memories which checks time-windows
                 await sync_user_memories(user_id, corpus_id, force=False, api_key=api_key)
                 return [TextContent(type="text", text=f"Added memory {memory_id}")]
                 
             elif name == "search_memories":
-                # Ensure ingested files are up to date via checking time windows
                 await sync_user_memories(user_id, corpus_id, force=False, api_key=api_key)
                 active_context = await storage.get_active_context(user_id)
                 results = await gemini_service.search_memory_files(arguments["query"], corpus_id, active_context, api_key=api_key)
@@ -284,9 +291,7 @@ async def handle_sse(request: Request) -> Response:
             elif name == "update_memory":
                 success, fname = await storage.update_memory(user_id, arguments["memory_id"], arguments["new_content"])
                 if success:
-                    # If it was an ingested/postdream file, it needs to be synced
                     if not fname.endswith(".active.md"):
-                        # Force sync the remote side to catch the modified file
                         await sync_user_memories(user_id, corpus_id, force=True, api_key=api_key)
                     return [TextContent(type="text", text=f"Updated memory {arguments['memory_id']}")]
                 return [TextContent(type="text", text=f"Memory {arguments['memory_id']} not found")]
