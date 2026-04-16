@@ -16,36 +16,28 @@ def get_client(api_key: str = None) -> genai.Client | None:
     return genai.Client(api_key=key.strip())
 
 async def create_file_search_store(display_name: str, api_key: str = None) -> str:
-    client = get_client(api_key)
-    if not client: return f"mock-store-id"
-    
-    def _create():
-        try:
-            store = client.file_search_stores.create(config={"display_name": display_name})
-            return store.name
-        except ClientError as e:
-            if "RESOURCE_EXHAUSTED" in str(e):
-                return "mock-store-id"
-            raise e
-            
-    return await asyncio.to_thread(_create)
+    # Instead of creating a buggy fileSearchStore, we will just use a generic user prefix for files
+    # This prevents the 10-Corpus limit naturally because Files don't have limits.
+    # The 'store_id' will simply act as a custom UUID tag we apply to files.
+    import uuid
+    return f"store_{uuid.uuid4().hex}"
 
 async def upload_and_attach_file(file_path: str, display_name: str, store_name: str, api_key: str = None) -> str:
     client = get_client(api_key)
-    if not client or store_name == "mock-store-id": return "mock-file-name"
+    if not client: return "mock-file-name"
     
     def _process():
         try:
-            # Force mime_type because google-genai fails to detect custom .md extensions in some Linux environments
-            op = client.file_search_stores.upload_to_file_search_store(
-                file_search_store_name=store_name,
+            # We natively upload the file without a fileSearchStore.
+            # We use the store_name as a tag in the display_name so we can group them later.
+            f = client.files.upload(
                 file=file_path,
                 config={
-                    "display_name": display_name,
-                    "mime_type": "text/markdown"
+                    "display_name": f"{store_name}_{display_name}",
+                    "mime_type": "text/plain" # Explicitly use text/plain so Gemini reads it perfectly
                 }
             )
-            return op.response.document_name
+            return f.name
         except Exception as e:
             print(f"Error uploading file {display_name}: {e}")
             return "mock-file-name"
@@ -54,13 +46,14 @@ async def upload_and_attach_file(file_path: str, display_name: str, store_name: 
 
 async def list_files_in_store(store_name: str, api_key: str = None) -> list[dict]:
     client = get_client(api_key)
-    if not client or store_name == "mock-store-id": return []
+    if not client: return []
     
     def _list():
         try:
             docs = []
-            for d in client.file_search_stores.documents.list(parent=store_name):
-                docs.append(d)
+            for f in client.files.list():
+                if getattr(f, 'display_name', '').startswith(f"{store_name}_"):
+                    docs.append(f)
             return docs
         except Exception as e:
             print(f"List files error: {e}")
@@ -69,52 +62,55 @@ async def list_files_in_store(store_name: str, api_key: str = None) -> list[dict
     return await asyncio.to_thread(_list)
 
 async def delete_file_from_store(doc_name: str, api_key: str = None):
+    # doc_name here is the actual File name (e.g. files/XYZ)
     client = get_client(api_key)
     if not client or "mock-" in doc_name: return
     
     def _delete():
         try:
-            client.file_search_stores.documents.delete(
-                name=doc_name, 
-                config={"force": True}
-            )
+            client.files.delete(name=doc_name)
         except Exception as e:
-            print(f"Failed to delete {doc_name}: {e}")
+            pass # Ignore deletion errors for files that might already be gone
             
     await asyncio.to_thread(_delete)
 
 async def delete_store(store_name: str, api_key: str = None):
     client = get_client(api_key)
-    if not client or "mock-" in store_name: return
+    if not client: return
     def _delete():
         try:
-            client.file_search_stores.delete(name=store_name, config={"force": True})
+            for f in client.files.list():
+                if getattr(f, 'display_name', '').startswith(f"{store_name}_"):
+                    client.files.delete(name=f.name)
         except Exception as e:
             pass
     await asyncio.to_thread(_delete)
 
 async def search_memory_files(query: str, store_name: str, active_context: str, api_key: str = None) -> str:
     client = get_client(api_key)
-    if not client or store_name == "mock-store-id":
-        return f"[Fallback Local Search]\n\n{active_context}\n\n(Note: Remote Gemini File Search Store is unavailable or quota exceeded)."
+    if not client:
+        return f"[Fallback Local Search]\n\n{active_context}\n\n(Note: Remote Gemini API is unavailable)."
         
     def _search():
-        prompt = f"Search the user's memories for information regarding: '{query}'.\n\nReturn the exact relevant facts or memory snippets found."
+        prompt = f"Search the provided memory files for information regarding: '{query}'.\n\nReturn the exact relevant facts or memory snippets found."
         if active_context:
             prompt += f"\n\nHere are the most recent ACTIVE memories that have not yet been ingested into the file store. Prioritize these if relevant:\n{active_context}"
             
-        tool = types.Tool(
-            file_search=types.FileSearch(
-                file_search_store_names=[store_name]
-            )
-        )
         try:
+            # Gather all files belonging to this store
+            files = []
+            for f in client.files.list():
+                if getattr(f, 'display_name', '').startswith(f"{store_name}_"):
+                    files.append(f)
+                    
+            if not files and not active_context:
+                return f"I could not find any information regarding '{query}' in your memories."
+                
+            # Feed the files and prompt directly to the context window (RAG)
+            contents = files + [prompt]
             res = client.models.generate_content(
                 model=SEARCH_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    tools=[tool]
-                )
+                contents=contents
             )
             return res.text
         except Exception as e:
