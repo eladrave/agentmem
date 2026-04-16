@@ -9,7 +9,6 @@ DREAM_MODEL = os.environ.get("GEMINI_DREAM_MODEL", "gemini-2.5-pro")
 SEARCH_MODEL = os.environ.get("GEMINI_MODEL_NAME", "gemini-2.5-flash")
 
 def get_client(api_key: str = None) -> genai.Client | None:
-    # If the user explicitly passed "None" or "", we fall back to SERVER_API_KEY
     key = api_key if api_key and api_key.strip() else SERVER_API_KEY
     if not key or not key.strip(): 
         print("CRITICAL: No API Key found in either explicit argument or SERVER_API_KEY")
@@ -37,10 +36,14 @@ async def upload_and_attach_file(file_path: str, display_name: str, store_name: 
     
     def _process():
         try:
+            # Force mime_type because google-genai fails to detect custom .md extensions in some Linux environments
             op = client.file_search_stores.upload_to_file_search_store(
                 file_search_store_name=store_name,
                 file=file_path,
-                config={"display_name": display_name}
+                config={
+                    "display_name": display_name,
+                    "mime_type": "text/markdown"
+                }
             )
             return op.response.document_name
         except Exception as e:
