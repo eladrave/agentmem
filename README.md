@@ -2,15 +2,16 @@
 
 A highly robust, multi-tenant, containerized Model Context Protocol (MCP) server. This server acts as the long-term cognitive memory for an AI system using a dual-layer storage approach:
 1. **Local File System**: Absolute Source of Truth, mounted via a cloud bucket or docker volume.
-2. **Google Gemini API**: Used for Semantic Retrieval and RAG queries (with graceful fallbacks for deprecation or API quota limits).
+2. **Google Gemini API**: Used for Semantic Retrieval and RAG queries via a direct Context Window injection (bypassing brittle black-box vector databases).
 
 ## Features
 
 - **Standard MCP Tool Exposal**: Exposes `add_memory`, `search_memories`, `update_memory`, `delete_memory`, and `sync_memories` directly to any standard MCP client.
-- **The "Dream" Subsystem**: A cognitive consolidation process. Mimicking sleep, it uses a heavier LLM reasoning model to deduplicate and synthesize raw daily logs into dense, high-value permanent memories.
+- **L1 / L2 Cache Architecture**: Memories are written immediately to local disk (L1 Active Cache) to prevent API rate limits. After a time-window expires, they are sealed and uploaded to the Gemini File API (L2 Ingested Cache).
+- **The "Dream" Subsystem**: A cognitive consolidation process. Mimicking sleep, it uses a heavier LLM reasoning model (`gemini-2.5-pro`) to deduplicate and synthesize raw daily logs into dense, high-value permanent memories.
 - **Robust Storage**: Uses completely flat markdown files with async locks to prevent race conditions. Fully Cloud Run and Cloud Storage FUSE compatible.
 - **Multi-Tenant Administration**: Admin endpoints to provision new isolated tenants, each with their own secure Gemini corpora and tokens.
-- **Bring Your Own Key (BYOK)**: Solves the Google Gemini 10-Corpus limit by allowing each user to securely provide their own `X-Gemini-Api-Key` HTTP Header over MCP!
+- **Bring Your Own Key (BYOK)**: Allows each user to securely provide their own `X-Gemini-Api-Key` HTTP Header over MCP to manage their own data and quota limits.
 
 ## Prerequisites
 
@@ -79,20 +80,20 @@ Here is a standard JSON example for configuring an MCP Client via Server-Sent Ev
   }
 }
 ```
-*Note: If you omit `X-Gemini-Api-Key`, the system will default to the Cloud Run server's global environment API key. If that global key hits the 10-corpus free-tier limit, semantic searches will gracefully return a mock placeholder while continuing to store data safely in your local Storage Bucket.*
+*Note: If you omit `X-Gemini-Api-Key`, the system will default to the Cloud Run server's global environment API key.*
 
 ### Available Tools
 
 Once connected, your AI agent will automatically be granted the following tools:
-1.  **`add_memory(content: str)`**: Appends a new memory block to today's active file and syncs it to Gemini.
-2.  **`search_memories(query: str)`**: Semantically searches all stored memories using the Gemini API.
+1.  **`add_memory(content: str)`**: Appends a new memory block to the local L1 cache.
+2.  **`search_memories(query: str)`**: Combines the L1 un-ingested context with the L2 remote Gemini File API, generating a conversational RAG response.
 3.  **`update_memory(memory_id: str, new_content: str)`**: Replaces the content of a specific memory block both locally and in Gemini.
 4.  **`delete_memory(memory_id: str)`**: Removes a specific memory block locally and from Gemini.
 5.  **`sync_memories(force_sync: bool)`**: Forces a synchronization between the local file system (Source of Truth) and the Gemini Corpus.
 
 ## Dealing with Key Rotations & Corpus Rebuilding
 
-If a user revokes their Gemini API key or wants to move their memory vector index to a brand new remote Corpus, they simply hit the `/api/corpus/rebuild` endpoint. Because the local Markdown files are the Absolute Source of Truth, the backend will generate a new Corpus on the new Key and automatically bulk-upload all existing memories directly into it!
+If a user revokes their Gemini API key or wants to move their memory vector index to a brand new remote account, they simply hit the `/api/corpus/rebuild` endpoint. Because the local Markdown files are the Absolute Source of Truth, the backend will generate a new Corpus on the new Key and automatically bulk-upload all existing memories directly into it!
 
 ```bash
 curl -X POST http://localhost:8080/api/corpus/rebuild \
